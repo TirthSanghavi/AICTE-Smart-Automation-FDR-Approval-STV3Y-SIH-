@@ -1,0 +1,407 @@
+// AICTE Security Deposit / FDR Management Portal — local synthetic-data prototype.
+// SQLite is used because the demo machine has no PostgreSQL/Docker. The model keeps
+// PDR invariants (UUID ids, Decimal money, date/event separation, insert-only evidence).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Institution {
+  id           String      @id @default(uuid())
+  aicteRef     String      @unique
+  name         String
+  category     String
+  state        String
+  city         String?
+  programmes   Programme[]
+  users        User[]
+  instruments  Instrument[]
+  releaseCases ReleaseCase[]
+  createdAt    DateTime    @default(now())
+}
+
+model Programme {
+  id            String      @id @default(uuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id])
+  name          String
+  level         String
+  intake        Int
+  createdAt     DateTime    @default(now())
+
+  @@index([institutionId])
+}
+
+model User {
+  id            String        @id @default(uuid())
+  email         String        @unique
+  name          String
+  role          String
+  institutionId String?
+  institution   Institution?  @relation(fields: [institutionId], references: [id])
+  passwordHash  String
+  status        String        @default("ACTIVE")
+  failedLogins  Int           @default(0)
+  lockedUntil   DateTime?
+  createdAt     DateTime      @default(now())
+  sessions      Session[]
+  auditEvents   AuditEvent[]
+  notifications Notification[]
+
+  @@index([institutionId])
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  tokenHash String   @unique
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  lastSeen  DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Instrument {
+  id                 String   @id @default(uuid())
+  institutionId      String
+  institution        Institution @relation(fields: [institutionId], references: [id])
+  bankName           String
+  normalizedBank     String
+  branch             String?
+  fdrNumber          String
+  normalizedFdr      String
+  amount             Decimal
+  currency           String   @default("INR")
+  issueDate          DateTime
+  maturityDate       DateTime
+  holderName         String
+  declaredLienStatus String   @default("UNKNOWN")
+  ifscCode           String?
+  lifecycleStatus    String   @default("DRAFT")
+  documentStatus     String   @default("NONE")
+  verificationStatus String   @default("NOT_CHECKED")
+  complianceStatus   String   @default("NOT_EVALUATED")
+  replacesId         String?
+  replaces           Instrument?  @relation("Replacement", fields: [replacesId], references: [id])
+  replacedBy         Instrument[] @relation("Replacement")
+  replacementReason  String?
+  replacedAt         DateTime?
+  replacedById       String?
+  versionNo          Int      @default(1)
+  createdBy          String
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  archivedAt         DateTime?
+
+  documents           DocumentVersion[]
+  findings            Finding[]
+  verificationAttempts VerificationAttempt[]
+  alerts              MaturityAlert[]
+  releaseCases        ReleaseCase[]
+  history             InstrumentHistory[]
+  extractedFields     ExtractedField[]
+  endorsements        HolderEndorsement[]
+
+  @@index([institutionId, lifecycleStatus])
+  @@index([normalizedBank, normalizedFdr])
+  @@index([maturityDate])
+}
+
+model InstrumentHistory {
+  id           String   @id @default(uuid())
+  instrumentId String
+  instrument   Instrument @relation(fields: [instrumentId], references: [id])
+  versionNo    Int
+  snapshot     String
+  changedBy    String
+  changedAt    DateTime @default(now())
+  reason       String?
+
+  @@index([instrumentId, versionNo])
+}
+
+model DocumentVersion {
+  id            String   @id @default(uuid())
+  instrumentId  String
+  instrument    Instrument @relation(fields: [instrumentId], references: [id])
+  versionNo     Int
+  originalName  String
+  storageKey    String
+  sha256        String
+  mime          String
+  size          Int
+  uploadedBy    String
+  docStatus     String   @default("UPLOADED")
+  createdAt     DateTime @default(now())
+  extractionRuns ExtractionRun[]
+
+  @@unique([instrumentId, versionNo])
+  @@index([instrumentId])
+}
+
+model ExtractionRun {
+  id         String   @id @default(uuid())
+  documentId String
+  document   DocumentVersion @relation(fields: [documentId], references: [id])
+  adapter    String
+  status     String
+  simulated  Boolean  @default(true)
+  startedAt  DateTime @default(now())
+  finishedAt DateTime?
+  error      String?
+  fields     ExtractedField[]
+
+  @@index([documentId])
+}
+
+model ExtractedField {
+  id              String   @id @default(uuid())
+  runId           String
+  run             ExtractionRun @relation(fields: [runId], references: [id])
+  instrumentId    String?
+  instrument      Instrument? @relation(fields: [instrumentId], references: [id])
+  name            String
+  value           String
+  confidence      Float
+  confirmedValue  String?
+  provenance      String   @default("OCR")
+  confirmedBy     String?
+  confirmedAt     DateTime?
+
+  @@unique([runId, name])
+  @@index([instrumentId])
+}
+
+// AICTE's relationship to an instrument (joint holder vs endorsement) is not confirmable
+// from the available requirements, so the endorsement is modelled as a separate,
+// explicitly-configured record and never asserted as joint account ownership.
+model HolderEndorsement {
+  id              String    @id @default(uuid())
+  instrumentId    String    @unique
+  instrument      Instrument @relation(fields: [instrumentId], references: [id])
+  status          String    @default("NOT_REQUIRED") // NOT_REQUIRED | PENDING | ENDORSED | REJECTED | WITHDRAWN
+  officerName     String?
+  officerReference String?
+  endorsedAt      DateTime?
+  documentRef     String?
+  remarks         String?
+  recordedBy      String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([instrumentId])
+}
+
+model Finding {
+  id                String   @id @default(uuid())
+  instrumentId      String
+  instrument        Instrument @relation(fields: [instrumentId], references: [id])
+  ruleId            String
+  field             String?
+  observed          String?
+  expected          String?
+  basis             String?
+  severity          String
+  explanation       String
+  recommendedAction String
+  resolutionStatus  String   @default("OPEN")
+  resolutionReason  String?
+  resolvedBy        String?
+  resolvedAt        DateTime?
+  correctionDueDate DateTime?
+  createdAt         DateTime @default(now())
+
+  @@index([instrumentId, resolutionStatus])
+  @@index([resolutionStatus, severity])
+}
+
+model VerificationAttempt {
+  id          String   @id @default(uuid())
+  instrumentId String
+  instrument  Instrument @relation(fields: [instrumentId], references: [id])
+  method      String
+  status      String
+  lienStatus  String   @default("UNKNOWN")
+  sourceName  String
+  reference   String?
+  asOf        DateTime
+  simulated   Boolean  @default(false)
+  byUser      String?
+  notes       String?
+  limitations String?
+  evidenceDocumentId String?
+  createdAt   DateTime @default(now())
+
+  @@index([instrumentId])
+}
+
+model MaturityAlert {
+  id            String   @id @default(uuid())
+  instrumentId  String
+  instrument    Instrument @relation(fields: [instrumentId], references: [id])
+  thresholdDays Int
+  recipientId   String
+  channel       String   @default("IN_APP")
+  status        String   @default("SENT")
+  dedupeKey     String   @unique
+  sentAt        DateTime @default(now())
+  ackAt         DateTime?
+  attempts      Int      @default(1)
+
+  @@index([instrumentId])
+}
+
+model ReleaseCase {
+  id              String   @id @default(uuid())
+  instrumentId    String
+  instrument      Instrument @relation(fields: [instrumentId], references: [id])
+  institutionId   String
+  institution     Institution @relation(fields: [institutionId], references: [id])
+  type            String
+  reason          String
+  status          String   @default("OPEN")
+  templateVersion String
+  templateLabel   String
+  ruleVersionId   String?
+  createdBy       String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tasks           ReviewTask[]
+  clearances      ClearanceNoc[]
+  decisions       Decision[]
+
+  @@index([institutionId, status])
+  @@index([instrumentId, type, status])
+}
+
+model ReviewTask {
+  id          String   @id @default(uuid())
+  caseId      String
+  case        ReleaseCase @relation(fields: [caseId], references: [id])
+  stepOrder   Int
+  role        String
+  title       String
+  description String
+  required    Boolean  @default(true)
+  status      String   @default("PENDING")
+  assigneeId  String?
+  outcome     String?
+  notes       String?
+  completedBy String?
+  completedAt DateTime?
+
+  @@index([caseId, stepOrder])
+}
+
+model ClearanceNoc {
+  id         String   @id @default(uuid())
+  caseId     String
+  case       ReleaseCase @relation(fields: [caseId], references: [id])
+  kind       String
+  issuer     String
+  reference  String
+  issuedOn   DateTime
+  scope      String
+  documentId String?
+  verifiedBy String?
+  verifiedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([caseId])
+}
+
+model Decision {
+  id                String   @id @default(uuid())
+  caseId            String
+  case              ReleaseCase @relation(fields: [caseId], references: [id])
+  outcome           String
+  reason            String
+  authorityUserId   String
+  checklistSnapshot String
+  ruleVersionId     String?
+  decidedAt         DateTime @default(now())
+
+  @@index([caseId])
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  type      String
+  title     String
+  body      String
+  status    String   @default("UNREAD")
+  dedupeKey String   @unique
+  createdAt DateTime @default(now())
+  readAt    DateTime?
+
+  @@index([userId, status])
+}
+
+model RuleSet {
+  id          String        @id @default(uuid())
+  code        String
+  title       String
+  description String
+  versions    RuleVersion[]
+
+  @@unique([code])
+}
+
+model RuleVersion {
+  id            String   @id @default(uuid())
+  ruleSetId     String
+  ruleSet       RuleSet  @relation(fields: [ruleSetId], references: [id])
+  version       Int
+  status        String   @default("PENDING_CONFIRMATION")
+  sourceRef     String
+  sourceTitle   String
+  clause        String
+  page          String
+  interpretation String
+  applicability String
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+  params        String?
+  approvedBy    String?
+  approvedAt    DateTime?
+  createdAt     DateTime @default(now())
+
+  @@unique([ruleSetId, version])
+}
+
+model AuditEvent {
+  id         String   @id @default(uuid())
+  chainIndex Int      @unique
+  ts         DateTime @default(now())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id])
+  actorRole  String?
+  action     String
+  entityType String
+  entityId   String
+  before     String?
+  after      String?
+  reason     String?
+  requestId  String?
+  prevHash   String?
+  hash       String
+
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([ts])
+}
+
+model DemoState {
+  id        String    @id @default("singleton")
+  demoDate  DateTime?
+  updatedAt DateTime  @updatedAt
+}
